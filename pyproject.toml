@@ -1,0 +1,58 @@
+[project]
+name = "aiven-clickstream"
+version = "0.1.0"
+description = "Clickstream data processing solution using Aiven services"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Data processing
+    "mage-ai>=0.9.79",
+    "pandas>=2.0,<3.0", # mage-ai incompatible with pandas 3.x (imports Union from pandas internals)
+    "polars>=1.30.0",
+    # Kafka
+    "kafka-python>=2.0.2",
+    # PostgreSQL
+    "psycopg2-binary>=2.9",
+    # OpenSearch
+    "opensearch-py>=2.4",
+    # Data validation and settings
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    # Environment management
+    "python-dotenv>=1.0",
+    # CLI
+    "typer[all]==0.9.0",
+    # Templating
+    "jinja2>=3.1.3",
+    "sshtunnel>=0.4.0",
+    # Process utilities
+    "psutil>=5.9",
+]
+
+[project.scripts]
+clickstream = "clickstream.app:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.setuptools]
+packages = ["clickstream"]
+
+[tool.uv]
+package = true

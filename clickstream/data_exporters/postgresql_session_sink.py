@@ -1,0 +1,132 @@
+# ==============================================================================
+# Streaming Data Exporter - Sessions to PostgreSQL (Bulk Upsert)
+# ==============================================================================
+"""
+Exports streaming sessions to PostgreSQL using bulk upserts.
+
+Uses psycopg2.extras.execute_batch() for high-performance bulk upserts,
+replacing the slow row-by-row inserts of Mage's built-in YAML exporter.
+
+Sessions are upserted (INSERT ... ON CONFLICT DO UPDATE) because session
+data is continuously updated as new events arrive for a visitor.
+
+Performance improvement: ~20-50x faster than the default YAML exporter
+when writing to remote databases (e.g., Aiven) due to reduced network
+round-trips.
+"""
+
+import logging
+from typing import Dict, List
+
+import psycopg2
+from psycopg2.extras import execute_batch
+from mage_ai.streaming.sinks.base_python import BasePythonSink
+
+if "streaming_sink" not in dir():
+    from mage_ai.data_preparation.decorators import streaming_sink
+
+from clickstream.utils.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+# Number of rows per batch sent to the server
+# Higher = fewer round-trips, but more memory usage
+# 1000 works well with typical session batches (~700 per 1000 events)
+PAGE_SIZE = 1000
+
+
+@streaming_sink
+class PostgresSessionsSink(BasePythonSink):
+    """Streaming sink that bulk-upserts sessions to PostgreSQL."""
+
+    def init_client(self):
+        """Initialize PostgreSQL connection."""
+        self.settings = get_settings()
+        self.schema = self.settings.postgres.schema_name
+        self.conn = None
+
+        try:
+            self.conn = psycopg2.connect(self.settings.postgres.connection_string)
+            logger.info(
+                "PostgresSessionsSink initialized (schema=%s, page_size=%d)",
+                self.schema,
+                PAGE_SIZE,
+            )
+        except Exception as e:
+            logger.error("Failed to connect to PostgreSQL: %s", e)
+            raise
+
+    def batch_write(self, messages: List[Dict]):
+        """
+        Bulk upsert sessions to PostgreSQL.
+
+        Args:
+            messages: List of session dictionaries with keys:
+                - session_id: str
+                - visitor_id: int
+                - session_start: ISO format timestamp string
+                - session_end: ISO format timestamp string
+                - duration_seconds: int
+                - event_count: int
+                - view_count: int
+                - cart_count: int
+                - transaction_count: int
+                - items_viewed: list of ints
+                - items_carted: list of ints
+                - items_purchased: list of ints
+                - converted: bool
+        """
+        if not messages:
+            return
+
+        if self.conn is None:
+            logger.error("PostgreSQL connection not available")
+            return
+
+        try:
+            with self.conn.cursor() as cur:
+                execute_batch(
+                    cur,
+                    f"""
+                    INSERT INTO {self.schema}.sessions
+                        (session_id, visitor_id, session_start, session_end,
+                         duration_seconds, event_count, view_count, cart_count,
+                         transaction_count, items_viewed, items_carted,
+                         items_purchased, converted)
+                    VALUES
+                        (%(session_id)s, %(visitor_id)s, %(session_start)s, %(session_end)s,
+                         %(duration_seconds)s, %(event_count)s, %(view_count)s, %(cart_count)s,
+                         %(transaction_count)s, %(items_viewed)s, %(items_carted)s,
+                         %(items_purchased)s, %(converted)s)
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        session_end = EXCLUDED.session_end,
+                        duration_seconds = EXCLUDED.duration_seconds,
+                        event_count = EXCLUDED.event_count,
+                        view_count = EXCLUDED.view_count,
+                        cart_count = EXCLUDED.cart_count,
+                        transaction_count = EXCLUDED.transaction_count,
+                        items_viewed = EXCLUDED.items_viewed,
+                        items_carted = EXCLUDED.items_carted,
+                        items_purchased = EXCLUDED.items_purchased,
+                        converted = EXCLUDED.converted
+                    """,
+                    messages,
+                    page_size=PAGE_SIZE,
+                )
+            self.conn.commit()
+            logger.info("Bulk upserted %d sessions", len(messages))
+
+        except Exception as e:
+            logger.error("Failed to bulk upsert sessions: %s", e)
+            if self.conn:
+                self.conn.rollback()
+            raise
+
+    def destroy(self):
+        """Clean up PostgreSQL connection."""
+        if self.conn:
+            try:
+                self.conn.close()
+                logger.info("PostgresSessionsSink connection closed")
+            except Exception as e:
+                logger.warning("Error closing PostgreSQL connection: %s", e)

@@ -1,0 +1,59 @@
+blocks:
+- all_upstream_blocks_executed: true
+  configuration: {}
+  downstream_blocks:
+  - transform_events
+  - transform_sessions
+  executor_type: local_python
+  language: python
+  name: kafka_postgresql_source
+  type: data_loader
+  upstream_blocks: []
+  uuid: kafka_postgresql_source
+- all_upstream_blocks_executed: true
+  configuration: {}
+  downstream_blocks:
+  - postgresql_event_sink
+  executor_type: local_python
+  language: python
+  name: transform_events
+  type: transformer
+  upstream_blocks:
+  - kafka_postgresql_source
+  uuid: transform_events
+- all_upstream_blocks_executed: true
+  configuration: {}
+  downstream_blocks:
+  - postgresql_session_sink
+  executor_type: local_python
+  language: python
+  name: transform_sessions
+  type: transformer
+  upstream_blocks:
+  - kafka_postgresql_source
+  uuid: transform_sessions
+- all_upstream_blocks_executed: true
+  configuration: {}
+  downstream_blocks: []
+  executor_type: local_python
+  language: python
+  name: postgresql_event_sink
+  type: data_exporter
+  upstream_blocks:
+  - transform_events
+  uuid: postgresql_event_sink
+- all_upstream_blocks_executed: true
+  configuration: {}
+  downstream_blocks: []
+  executor_type: local_python
+  language: python
+  name: postgresql_session_sink
+  type: data_exporter
+  upstream_blocks:
+  - transform_sessions
+  uuid: postgresql_session_sink
+executor_count: 1
+executor_type: local_python
+name: postgresql_consumer
+type: streaming
+uuid: postgresql_consumer

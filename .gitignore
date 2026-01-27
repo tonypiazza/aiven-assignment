@@ -1,0 +1,65 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Mage AI
+mage_data/
+.mage_temp/
+.file_versions/
+
+# Ruff cache
+.ruff_cache/
+
+# Benchmark
+benchmark_results.csv
+
+# Terraform
+terraform/terraform.tfvars
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log
+terraform/crash.*.log
+terraform/*.auto.tfvars
+terraform/override.tf
+terraform/override.tf.json
+terraform/*_override.tf
+terraform/*_override.tf.json
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfplan
+
+# Generated
+certs/
+
+# Clickstream (Mage AI project)
+clickstream/.log
+clickstream/.logs/
+clickstream/.mage_temp_profiles
+clickstream/.preferences.yaml
+clickstream/.variables/
+clickstream/docker-compose.override.yml
+clickstream/logs/
+clickstream/mage-ai.db
+clickstream/secrets/

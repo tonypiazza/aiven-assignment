@@ -1,0 +1,50 @@
+version: 0.1.1
+
+# ==============================================================================
+# Aiven Services Profile
+# ==============================================================================
+# This configuration connects to Aiven-managed services:
+#   - PostgreSQL: Event storage and analytics
+#   - Kafka: Event streaming (handled via kafka-python, not Mage IO)
+#   - OpenSearch: Full-text search and analytics
+# ==============================================================================
+
+default:
+  # ============================================================================
+  # PostgreSQL (Aiven)
+  # ============================================================================
+  # Connection settings for Aiven PostgreSQL
+  POSTGRES_CONNECT_TIMEOUT: 10
+  POSTGRES_DBNAME: "{{ env_var('PG_DATABASE', 'clickstream') }}"
+  POSTGRES_SCHEMA: public
+  POSTGRES_USER: "{{ env_var('PG_USER') }}"
+  POSTGRES_PASSWORD: "{{ env_var('PG_PASSWORD') }}"
+  POSTGRES_HOST: "{{ env_var('PG_HOST') }}"
+  POSTGRES_PORT: "{{ env_var('PG_PORT', '5432') }}"
+
+  # ============================================================================
+  # OpenSearch (Aiven)
+  # ============================================================================
+  # Connection settings for Aiven OpenSearch
+  OPENSEARCH_HOST: "{{ env_var('OPENSEARCH_HOST') }}"
+  OPENSEARCH_PORT: "{{ env_var('OPENSEARCH_PORT', '443') }}"
+  OPENSEARCH_USER: "{{ env_var('OPENSEARCH_USER') }}"
+  OPENSEARCH_PASSWORD: "{{ env_var('OPENSEARCH_PASSWORD') }}"
+
+# ==============================================================================
+# Development Profile (Optional)
+# ==============================================================================
+# Use this profile for local development with different settings
+dev:
+  POSTGRES_CONNECT_TIMEOUT: 10
+  POSTGRES_DBNAME: "{{ env_var('PG_DATABASE', 'clickstream') }}"
+  POSTGRES_SCHEMA: public
+  POSTGRES_USER: "{{ env_var('PG_USER') }}"
+  POSTGRES_PASSWORD: "{{ env_var('PG_PASSWORD') }}"
+  POSTGRES_HOST: "{{ env_var('PG_HOST') }}"
+  POSTGRES_PORT: "{{ env_var('PG_PORT', '5432') }}"
+  
+  OPENSEARCH_HOST: "{{ env_var('OPENSEARCH_HOST') }}"
+  OPENSEARCH_PORT: "{{ env_var('OPENSEARCH_PORT', '443') }}"
+  OPENSEARCH_USER: "{{ env_var('OPENSEARCH_USER') }}"
+  OPENSEARCH_PASSWORD: "{{ env_var('OPENSEARCH_PASSWORD') }}"
