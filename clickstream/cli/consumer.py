@@ -10,7 +10,7 @@ Kafka consumers (PostgreSQL and OpenSearch).
 
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 
@@ -75,23 +75,47 @@ def consumer_start(
     truncate_log: Annotated[
         bool, typer.Option("--truncate-log", "-t", help="Truncate log files before starting")
     ] = False,
+    instances: Annotated[
+        Optional[int],
+        typer.Option(
+            "--instances",
+            "-i",
+            help="Number of consumer instances to start (default: number of partitions)",
+        ),
+    ] = None,
 ) -> None:
     """Start the consumer pipeline as background processes.
 
-    Spawns one consumer process per Kafka partition for parallel processing.
-    Each consumer continuously consumes events from Kafka, aggregates them into sessions,
-    and writes the results to PostgreSQL.
+    Spawns consumer processes for parallel processing. By default, spawns one
+    consumer per Kafka partition. Use --instances to spawn fewer consumers
+    (each consumer will handle multiple partitions).
 
     Use 'clickstream consumer stop' to stop all consumer instances.
 
     Examples:
         clickstream consumer start
+        clickstream consumer start --instances 2      # Start 2 consumers (regardless of partitions)
         clickstream consumer start --truncate-log     # Clear logs before starting
     """
     import glob as glob_module
 
     settings = get_settings()
-    num_instances = settings.kafka.events_topic_partitions
+    max_instances = settings.kafka.events_topic_partitions
+
+    # Determine number of instances to start
+    if instances is None:
+        num_instances = max_instances
+    else:
+        if instances < 1:
+            print(f"{C.BRIGHT_RED}{I.CROSS} --instances must be at least 1{C.RESET}")
+            raise typer.Exit(1)
+        if instances > max_instances:
+            print(
+                f"{C.BRIGHT_RED}{I.CROSS} --instances ({instances}) cannot exceed "
+                f"partition count ({max_instances}){C.RESET}"
+            )
+            raise typer.Exit(1)
+        num_instances = instances
 
     # Check if already running
     running = _count_running_consumers()
@@ -117,10 +141,10 @@ def consumer_start(
     # Check topic partition count if topic exists
     topic = settings.kafka.events_topic
     existing_partitions = _get_topic_partition_count(topic)
-    if existing_partitions is not None and existing_partitions < num_instances:
+    if existing_partitions is not None and existing_partitions < max_instances:
         print(
             f"{C.BRIGHT_RED}{I.CROSS} Topic '{topic}' has {existing_partitions} partitions, "
-            f"but {num_instances} are configured{C.RESET}"
+            f"but {max_instances} are configured{C.RESET}"
         )
         print(
             f"  Run '{C.WHITE}clickstream data reset -y{C.RESET}' to recreate topic with correct partitions"
@@ -179,7 +203,13 @@ def consumer_start(
             print(f"{C.BRIGHT_RED}{I.CROSS} Failed to initialize OpenSearch: {e}{C.RESET}")
             raise typer.Exit(1)
 
-    print(f"  Starting {num_instances} PostgreSQL consumer instances...")
+    if num_instances < max_instances:
+        print(
+            f"  Starting {num_instances} PostgreSQL consumer instances "
+            f"(for {max_instances} partitions)..."
+        )
+    else:
+        print(f"  Starting {num_instances} PostgreSQL consumer instances...")
 
     # Get paths
     project_root = get_project_root()
@@ -262,6 +292,14 @@ def consumer_restart(
     truncate_log: Annotated[
         bool, typer.Option("--truncate-log", "-t", help="Truncate log files before starting")
     ] = False,
+    instances: Annotated[
+        Optional[int],
+        typer.Option(
+            "--instances",
+            "-i",
+            help="Number of consumer instances to start (default: number of partitions)",
+        ),
+    ] = None,
 ) -> None:
     """Restart all consumer instances (PostgreSQL and OpenSearch).
 
@@ -270,7 +308,8 @@ def consumer_restart(
 
     Examples:
         clickstream consumer restart
-        clickstream consumer restart --truncate-log     # Clear logs before starting
+        clickstream consumer restart --instances 2        # Restart with 2 consumers
+        clickstream consumer restart --truncate-log       # Clear logs before starting
     """
     # Stop if running
     running = _count_running_consumers()
@@ -288,7 +327,7 @@ def consumer_restart(
         time.sleep(1)  # Brief pause to ensure clean shutdown
 
     # Start fresh
-    consumer_start(truncate_log=truncate_log)
+    consumer_start(truncate_log=truncate_log, instances=instances)
 
 
 def consumer_logs(
