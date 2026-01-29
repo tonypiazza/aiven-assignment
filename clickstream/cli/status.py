@@ -315,8 +315,15 @@ def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
 
     Strategy:
     1. Try Aiven API first to check if service is running
-    2. If running, get row counts via direct connection
-    3. If API not configured or fails, fall back to direct connection only
+    2. If running, check server reachability via 'postgres' database
+    3. Then check if target database exists
+    4. Then check if schema exists and get row counts
+
+    Status values:
+    - unreachable: Server is not reachable
+    - no_database: Server is up but target database doesn't exist
+    - no_schema: Database exists but schema not initialized
+    - connected: Everything is ready
     """
     pg_status = "unreachable"
     pg_events = None
@@ -346,6 +353,29 @@ def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
     try:
         import psycopg2
 
+        # Step 1: Check if server is reachable by connecting to 'postgres' database
+        server_conn_string = (
+            f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
+            f"{settings.postgres.host}:{settings.postgres.port}/postgres"
+            f"?sslmode={settings.postgres.sslmode}"
+        )
+        with psycopg2.connect(server_conn_string, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                # Step 2: Check if target database exists
+                cur.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s",
+                    (settings.postgres.database,),
+                )
+                if not cur.fetchone():
+                    pg_status = "no_database"
+                    return {
+                        "status": pg_status,
+                        "events": None,
+                        "sessions": None,
+                        "rate": None,
+                    }
+
+        # Step 3: Database exists, connect to it and check schema
         with psycopg2.connect(settings.postgres.connection_string, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 schema_name = settings.postgres.schema_name
@@ -776,33 +806,51 @@ def _collect_status_data() -> dict[str, Any]:
     try:
         import psycopg2
 
-        with psycopg2.connect(settings.postgres.connection_string, connect_timeout=5) as conn:
+        # Step 1: Check if server is reachable by connecting to 'postgres' database
+        server_conn_string = (
+            f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
+            f"{settings.postgres.host}:{settings.postgres.port}/postgres"
+            f"?sslmode={settings.postgres.sslmode}"
+        )
+        with psycopg2.connect(server_conn_string, connect_timeout=5) as conn:
             with conn.cursor() as cur:
-                schema_name = settings.postgres.schema_name
+                # Step 2: Check if target database exists
                 cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = %s 
-                        AND table_name = 'events'
-                    )
-                    """,
-                    (schema_name,),
+                    "SELECT 1 FROM pg_database WHERE datname = %s",
+                    (settings.postgres.database,),
                 )
-                result = cur.fetchone()
-                schema_exists = result[0] if result else False
+                if not cur.fetchone():
+                    pg_status = "no_database"
 
-                if schema_exists:
-                    cur.execute(f"SELECT COUNT(*) FROM {schema_name}.events")
+        # Step 3: Database exists, connect to it and check schema
+        if pg_status != "no_database":
+            with psycopg2.connect(settings.postgres.connection_string, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    schema_name = settings.postgres.schema_name
+                    cur.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = %s 
+                            AND table_name = 'events'
+                        )
+                        """,
+                        (schema_name,),
+                    )
                     result = cur.fetchone()
-                    pg_events = result[0] if result else 0
+                    schema_exists = result[0] if result else False
 
-                    cur.execute(f"SELECT COUNT(*) FROM {schema_name}.sessions")
-                    result = cur.fetchone()
-                    pg_sessions = result[0] if result else 0
-                    pg_status = "connected"
-                else:
-                    pg_status = "no_schema"
+                    if schema_exists:
+                        cur.execute(f"SELECT COUNT(*) FROM {schema_name}.events")
+                        result = cur.fetchone()
+                        pg_events = result[0] if result else 0
+
+                        cur.execute(f"SELECT COUNT(*) FROM {schema_name}.sessions")
+                        result = cur.fetchone()
+                        pg_sessions = result[0] if result else 0
+                        pg_status = "connected"
+                    else:
+                        pg_status = "no_schema"
     except Exception:
         pass
 
@@ -1024,6 +1072,13 @@ def _display_status(data: dict[str, Any]) -> None:
         if pg["rate"] is not None:
             rate_str = f"{pg['rate']:,.0f} inserts/sec"
             print(_box_line(f"    Rate:     {C.WHITE}{rate_str}{C.RESET}", W))
+    elif pg["status"] == "no_database":
+        print(
+            _box_line(
+                f"  {C.BRIGHT_YELLOW}{I.WARN}{C.RESET} {C.BOLD}PostgreSQL{C.RESET} {C.DIM}(no database){C.RESET}",
+                W,
+            )
+        )
     elif pg["status"] == "no_schema":
         print(
             _box_line(

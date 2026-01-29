@@ -44,6 +44,50 @@ def render_schema_sql(schema_name: str) -> str:
     return template.render(schema_name=schema_name)
 
 
+def ensure_database_exists() -> None:
+    """
+    Ensure the target database exists, creating it if needed.
+
+    Connects to the 'postgres' database (which always exists) to check
+    and create the target database.
+
+    Raises:
+        RuntimeError: If database creation fails
+    """
+    settings = get_settings()
+    target_db = settings.postgres.database
+
+    # Build connection string to 'postgres' database instead of target
+    postgres_conn_string = (
+        f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
+        f"{settings.postgres.host}:{settings.postgres.port}/postgres"
+        f"?sslmode={settings.postgres.sslmode}"
+    )
+
+    try:
+        # Connect to postgres database to check/create target database
+        # Use autocommit because CREATE DATABASE cannot run inside a transaction
+        conn = psycopg2.connect(postgres_conn_string, connect_timeout=5)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                # Check if database exists
+                cur.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s",
+                    (target_db,),
+                )
+                if cur.fetchone() is None:
+                    # Database doesn't exist, create it
+                    logger.info("Creating database '%s'...", target_db)
+                    # Use quote_ident to safely escape the database name
+                    cur.execute(f'CREATE DATABASE "{target_db}"')
+                    logger.info("Database '%s' created.", target_db)
+        finally:
+            conn.close()
+    except Exception as e:
+        raise RuntimeError(f"Failed to ensure database exists: {e}") from e
+
+
 def check_schema_exists() -> bool:
     """Check if the database schema (events table) exists."""
     try:
@@ -72,10 +116,14 @@ def ensure_schema() -> None:
     Ensure database schema exists, initializing if needed.
 
     This function is idempotent and safe to call multiple times.
+    It will create the database if it doesn't exist.
 
     Raises:
         RuntimeError: If schema file not found or initialization fails
     """
+    # First ensure the database itself exists
+    ensure_database_exists()
+
     if check_schema_exists():
         return
 
