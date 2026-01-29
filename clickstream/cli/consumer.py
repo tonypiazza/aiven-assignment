@@ -80,7 +80,8 @@ def consumer_start(
         typer.Option(
             "--instances",
             "-i",
-            help="Number of consumer instances to start (default: number of partitions)",
+            help="Number of consumer instances to start",
+            show_default="number of partitions",
         ),
     ] = None,
 ) -> None:
@@ -297,7 +298,8 @@ def consumer_restart(
         typer.Option(
             "--instances",
             "-i",
-            help="Number of consumer instances to start (default: number of partitions)",
+            help="Number of consumer instances to start",
+            show_default="number of partitions",
         ),
     ] = None,
 ) -> None:

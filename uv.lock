@@ -65,7 +65,7 @@ wheels = [
 ]
 
 [[package]]
-name = "aiven-assignment"
+name = "aiven-clickstream"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
