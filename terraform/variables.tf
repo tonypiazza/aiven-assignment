@@ -1,5 +1,20 @@
 # ==============================================================================
-# AUTHENTICATION
+# DEPLOYMENT SCENARIO
+# ==============================================================================
+
+variable "deployment_scenario" {
+  description = "Deployment scenario: local, ec2_public, or ec2_privatelink"
+  type        = string
+  default     = "local"
+
+  validation {
+    condition     = contains(["local", "ec2_public", "ec2_privatelink"], var.deployment_scenario)
+    error_message = "deployment_scenario must be one of: local, ec2_public, ec2_privatelink"
+  }
+}
+
+# ==============================================================================
+# AIVEN AUTHENTICATION
 # ==============================================================================
 
 variable "aiven_api_token" {
@@ -14,7 +29,7 @@ variable "aiven_api_token" {
 }
 
 # ==============================================================================
-# ORGANIZATION
+# AIVEN ORGANIZATION
 # ==============================================================================
 
 variable "organization_name" {
@@ -38,7 +53,7 @@ variable "billing_group_id" {
 }
 
 # ==============================================================================
-# PROJECT
+# AIVEN PROJECT
 # ==============================================================================
 
 variable "project_name" {
@@ -64,13 +79,13 @@ variable "cloud_name" {
 }
 
 # ==============================================================================
-# SERVICE PLANS
+# AIVEN SERVICE PLANS
 # ==============================================================================
 
 variable "kafka_plan" {
   description = "Kafka service plan"
   type        = string
-  default     = "startup-2"
+  default     = "startup-4"
 
   validation {
     condition     = can(regex("^(hobbyist|(startup|business|premium)-[0-9]+)$", var.kafka_plan))
@@ -89,6 +104,17 @@ variable "pg_plan" {
   }
 }
 
+variable "valkey_plan" {
+  description = "Valkey service plan"
+  type        = string
+  default     = "startup-4"
+
+  validation {
+    condition     = can(regex("^(hobbyist|(startup|business|premium)-[0-9]+)$", var.valkey_plan))
+    error_message = "Valkey plan must be 'hobbyist' or in format '<tier>-<size>' (e.g., 'startup-4', 'business-8', 'premium-16')."
+  }
+}
+
 variable "opensearch_plan" {
   description = "OpenSearch service plan"
   type        = string
@@ -100,29 +126,24 @@ variable "opensearch_plan" {
   }
 }
 
-variable "valkey_plan" {
-  description = "Valkey (Redis-compatible) service plan"
-  type        = string
-  default     = "startup-4"
-
-  validation {
-    condition     = can(regex("^(hobbyist|(startup|business|premium)-[0-9]+)$", var.valkey_plan))
-    error_message = "Valkey plan must be 'hobbyist' or in format '<tier>-<size>' (e.g., 'startup-4', 'business-8', 'premium-16')."
-  }
+variable "opensearch_enabled" {
+  description = "Enable OpenSearch service"
+  type        = bool
+  default     = false
 }
 
 # ==============================================================================
-# SERVICE VERSIONS
+# AIVEN SERVICE VERSIONS
 # ==============================================================================
 
 variable "kafka_version" {
   description = "Kafka version"
   type        = string
-  default     = "3.8"
+  default     = "3.9"
 
   validation {
     condition     = can(regex("^[0-9]+\\.[0-9]+$", var.kafka_version))
-    error_message = "Kafka version must be in format 'X.Y' (e.g., '3.8', '3.7')."
+    error_message = "Kafka version must be in format 'X.Y' (e.g., '3.9', '3.8')."
   }
 }
 
@@ -138,7 +159,70 @@ variable "pg_version" {
 }
 
 # ==============================================================================
-# MAINTENANCE WINDOW
+# AIVEN KAFKA TOPIC SETTINGS
+# ==============================================================================
+
+variable "kafka_events_topic_name" {
+  description = "Kafka events topic name"
+  type        = string
+  default     = "clickstream-events"
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9._-]+$", var.kafka_events_topic_name)) && length(var.kafka_events_topic_name) <= 249
+    error_message = "Kafka topic name must contain only alphanumeric characters, dots, underscores, and hyphens, and be at most 249 characters."
+  }
+}
+
+variable "kafka_events_topic_partitions" {
+  description = "Kafka events topic partitions"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.kafka_events_topic_partitions >= 1 && var.kafka_events_topic_partitions <= 1000
+    error_message = "Kafka topic partitions must be between 1 and 1000."
+  }
+}
+
+variable "kafka_events_topic_replication" {
+  description = "Kafka events topic replication factor"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.kafka_events_topic_replication >= 1 && var.kafka_events_topic_replication <= 10
+    error_message = "Kafka replication factor must be between 1 and 10."
+  }
+}
+
+variable "kafka_events_topic_retention_ms" {
+  description = "Kafka events topic retention in milliseconds"
+  type        = string
+  default     = "604800000" # 7 days
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.kafka_events_topic_retention_ms)) && tonumber(var.kafka_events_topic_retention_ms) >= 0
+    error_message = "Kafka retention must be a non-negative number in milliseconds."
+  }
+}
+
+# ==============================================================================
+# AIVEN POSTGRESQL SETTINGS
+# ==============================================================================
+
+variable "pg_database_name" {
+  description = "PostgreSQL database name"
+  type        = string
+  default     = "clickstream"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_]*$", var.pg_database_name)) && length(var.pg_database_name) <= 63
+    error_message = "PostgreSQL database name must start with a letter or underscore, contain only lowercase letters, numbers, and underscores, and be at most 63 characters."
+  }
+}
+
+# ==============================================================================
+# AIVEN MAINTENANCE WINDOW
 # ==============================================================================
 
 variable "maintenance_window_dow" {
@@ -164,86 +248,73 @@ variable "maintenance_window_time" {
 }
 
 # ==============================================================================
-# SERVICE CONFIGURATION
+# AIVEN VPC / PRIVATELINK
 # ==============================================================================
 
-variable "opensearch_enabled" {
-  description = "Enable OpenSearch service (optional, for dashboards)"
-  type        = bool
-  default     = false
-}
-
-variable "termination_protection" {
-  description = "Enable termination protection for services"
-  type        = bool
-  default     = false
-}
-
-# ==============================================================================
-# KAFKA TOPIC SETTINGS
-# Must match corresponding values in .env file
-# ==============================================================================
-
-# Must match KAFKA_EVENTS_TOPIC in .env
-variable "kafka_events_topic_name" {
-  description = "Kafka events topic name"
+variable "aiven_vpc_cidr" {
+  description = "CIDR block for Aiven Project VPC (used with ec2_privatelink)"
   type        = string
-  default     = "clickstream-events"
-
-  validation {
-    condition     = can(regex("^[a-zA-Z0-9._-]+$", var.kafka_events_topic_name)) && length(var.kafka_events_topic_name) <= 249
-    error_message = "Kafka topic name must contain only alphanumeric characters, dots, underscores, and hyphens, and be at most 249 characters."
-  }
-}
-
-# Must match KAFKA_EVENTS_TOPIC_PARTITIONS in .env
-variable "kafka_events_topic_partitions" {
-  description = "Kafka events topic partitions"
-  type        = number
-  default     = 3
-
-  validation {
-    condition     = var.kafka_events_topic_partitions >= 1 && var.kafka_events_topic_partitions <= 1000
-    error_message = "Kafka topic partitions must be between 1 and 1000."
-  }
-}
-
-# Max depends on plan's broker count
-variable "kafka_events_topic_replication" {
-  description = "Kafka events topic replication factor"
-  type        = number
-  default     = 2
-
-  validation {
-    condition     = var.kafka_events_topic_replication >= 1 && var.kafka_events_topic_replication <= 10
-    error_message = "Kafka replication factor must be between 1 and 10."
-  }
-}
-
-variable "kafka_events_topic_retention_ms" {
-  description = "Kafka events topic retention in milliseconds"
-  type        = string
-  default     = "604800000" # 7 days
-
-  validation {
-    condition     = can(regex("^[0-9]+$", var.kafka_events_topic_retention_ms)) && tonumber(var.kafka_events_topic_retention_ms) >= 0
-    error_message = "Kafka retention must be a non-negative number in milliseconds."
-  }
+  default     = "192.168.0.0/24"
 }
 
 # ==============================================================================
-# POSTGRESQL SETTINGS
-# Must match corresponding values in .env file
+# AWS CONFIGURATION
 # ==============================================================================
 
-# Must match PG_DATABASE in .env
-variable "pg_database_name" {
-  description = "PostgreSQL database name"
+variable "aws_region" {
+  description = "AWS region for benchmark infrastructure"
   type        = string
-  default     = "clickstream"
+  default     = "us-east-2"
+}
 
-  validation {
-    condition     = can(regex("^[a-z_][a-z0-9_]*$", var.pg_database_name)) && length(var.pg_database_name) <= 63
-    error_message = "PostgreSQL database name must start with a letter or underscore, contain only lowercase letters, numbers, and underscores, and be at most 63 characters."
-  }
+variable "aws_account_id" {
+  description = "AWS Account ID (required for ec2_privatelink scenario)"
+  type        = string
+  default     = ""
+}
+
+variable "aws_vpc_cidr" {
+  description = "CIDR block for AWS VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "public_subnet_cidr" {
+  description = "CIDR block for public subnet"
+  type        = string
+  default     = "10.0.1.0/24"
+}
+
+variable "private_subnet_cidr" {
+  description = "CIDR block for private subnet"
+  type        = string
+  default     = "10.0.2.0/24"
+}
+
+# ==============================================================================
+# AWS EC2 CONFIGURATION
+# ==============================================================================
+
+variable "instance_type" {
+  description = "EC2 instance type for benchmark"
+  type        = string
+  default     = "c6i.2xlarge"
+}
+
+variable "key_pair_name" {
+  description = "Name of existing EC2 key pair for SSH access"
+  type        = string
+  default     = ""
+}
+
+variable "ssh_allowed_cidr" {
+  description = "CIDR block allowed to SSH to EC2"
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "github_repo_url" {
+  description = "GitHub repository URL to clone on EC2"
+  type        = string
+  default     = "https://github.com/tonypiazza/aiven-clickstream-demo.git"
 }

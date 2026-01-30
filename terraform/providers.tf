@@ -10,6 +10,10 @@ terraform {
       source  = "aiven/aiven"
       version = "4.49.0"
     }
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
   }
 }
 
@@ -19,4 +23,8 @@ terraform {
 
 provider "aiven" {
   api_token = var.aiven_api_token
+}
+
+provider "aws" {
+  region = var.aws_region
 }

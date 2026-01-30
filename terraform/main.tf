@@ -1,135 +1,86 @@
 # ==============================================================================
-# DATA SOURCES
+# LOCAL VARIABLES
 # ==============================================================================
 
-data "aiven_organization" "this" {
-  name = var.organization_name
-}
-
-data "aiven_billing_group" "this" {
-  billing_group_id = var.billing_group_id
-}
-
-# ==============================================================================
-# PROJECT
-# ==============================================================================
-
-resource "aiven_project" "this" {
-  project       = var.project_name
-  parent_id     = data.aiven_organization.this.id
-  billing_group = data.aiven_billing_group.this.id
+locals {
+  # Derive flags from deployment_scenario
+  deploy_aws         = var.deployment_scenario != "local"
+  enable_privatelink = var.deployment_scenario == "ec2_privatelink"
 }
 
 # ==============================================================================
-# KAFKA SERVICE
+# AIVEN MODULE
 # ==============================================================================
-#
-# Kafka handles event streaming from producer to consumer.
-# Events are keyed by visitor_id for partition affinity.
-#
 
-resource "aiven_kafka" "this" {
-  project                 = aiven_project.this.project
-  cloud_name              = var.cloud_name
-  plan                    = var.kafka_plan
-  service_name            = "${var.project_name}-kafka"
+module "aiven" {
+  source = "./modules/aiven"
+
+  # Authentication
+  aiven_api_token = var.aiven_api_token
+
+  # Organization
+  organization_name = var.organization_name
+  billing_group_id  = var.billing_group_id
+
+  # Project
+  project_name = var.project_name
+  cloud_name   = var.cloud_name
+
+  # Service plans
+  kafka_plan         = var.kafka_plan
+  pg_plan            = var.pg_plan
+  valkey_plan        = var.valkey_plan
+  opensearch_plan    = var.opensearch_plan
+  opensearch_enabled = var.opensearch_enabled
+
+  # Service versions
+  kafka_version = var.kafka_version
+  pg_version    = var.pg_version
+
+  # Kafka topic settings
+  kafka_events_topic_name         = var.kafka_events_topic_name
+  kafka_events_topic_partitions   = var.kafka_events_topic_partitions
+  kafka_events_topic_replication  = var.kafka_events_topic_replication
+  kafka_events_topic_retention_ms = var.kafka_events_topic_retention_ms
+
+  # PostgreSQL settings
+  pg_database_name = var.pg_database_name
+
+  # Maintenance window
   maintenance_window_dow  = var.maintenance_window_dow
   maintenance_window_time = var.maintenance_window_time
 
-  kafka_user_config {
-    kafka_version = var.kafka_version
-  }
+  # PrivateLink configuration
+  privatelink_enabled = local.enable_privatelink
+  aiven_vpc_cidr      = var.aiven_vpc_cidr
+  aws_account_id      = var.aws_account_id
 }
 
 # ==============================================================================
-# KAFKA TOPIC - Events
+# AWS MODULE
 # ==============================================================================
-#
-# The events topic receives raw clickstream events from the producer.
-# Partition count should match KAFKA_EVENTS_TOPIC_PARTITIONS in .env
-# to enable parallel consumer processing.
-#
 
-resource "aiven_kafka_topic" "this" {
-  project      = aiven_project.this.project
-  service_name = aiven_kafka.this.service_name
-  topic_name   = var.kafka_events_topic_name
-  partitions   = var.kafka_events_topic_partitions
-  replication  = var.kafka_events_topic_replication
+module "aws" {
+  source = "./modules/aws"
+  count  = local.deploy_aws ? 1 : 0
 
-  config {
-    cleanup_policy = "delete"
-    retention_ms   = var.kafka_events_topic_retention_ms
-  }
-}
+  # AWS configuration
+  aws_region          = var.aws_region
+  aws_vpc_cidr        = var.aws_vpc_cidr
+  public_subnet_cidr  = var.public_subnet_cidr
+  private_subnet_cidr = var.private_subnet_cidr
 
-# ==============================================================================
-# POSTGRESQL SERVICE
-# ==============================================================================
-#
-# PostgreSQL stores processed sessions and supports analytics queries.
-# Schema is auto-initialized by 'clickstream consumer start'.
-#
+  # EC2 configuration
+  instance_type    = var.instance_type
+  key_pair_name    = var.key_pair_name
+  ssh_allowed_cidr = var.ssh_allowed_cidr
+  github_repo_url  = var.github_repo_url
 
-resource "aiven_pg" "this" {
-  project                 = aiven_project.this.project
-  cloud_name              = var.cloud_name
-  plan                    = var.pg_plan
-  service_name            = "${var.project_name}-pg"
-  maintenance_window_dow  = var.maintenance_window_dow
-  maintenance_window_time = var.maintenance_window_time
+  # PrivateLink configuration
+  privatelink_enabled = local.enable_privatelink
 
-  pg_user_config {
-    pg_version = var.pg_version
-  }
-}
-
-resource "aiven_pg_database" "this" {
-  project       = aiven_project.this.project
-  service_name  = aiven_pg.this.service_name
-  database_name = var.pg_database_name
-}
-
-# ==============================================================================
-# OPENSEARCH SERVICE (Optional)
-# ==============================================================================
-#
-# OpenSearch provides real-time dashboards for clickstream analytics.
-# Index is auto-initialized by 'clickstream consumer start' when enabled.
-#
-
-resource "aiven_opensearch" "this" {
-  count = var.opensearch_enabled ? 1 : 0
-
-  project                 = aiven_project.this.project
-  cloud_name              = var.cloud_name
-  plan                    = var.opensearch_plan
-  service_name            = "${var.project_name}-opensearch"
-  maintenance_window_dow  = var.maintenance_window_dow
-  maintenance_window_time = var.maintenance_window_time
-
-  opensearch_user_config {
-    opensearch_dashboards {
-      enabled            = true
-      max_old_space_size = 512
-    }
-  }
-}
-
-# ==============================================================================
-# VALKEY SERVICE (Redis-compatible)
-# ==============================================================================
-#
-# Valkey caches in-progress session state for the consumer.
-# Sessions are tracked in memory until they timeout (default: 30 min),
-# then flushed to PostgreSQL.
-#
-
-resource "aiven_valkey" "this" {
-  project                 = aiven_project.this.project
-  cloud_name              = var.cloud_name
-  plan                    = var.valkey_plan
-  service_name            = "${var.project_name}-valkey"
-  maintenance_window_dow  = var.maintenance_window_dow
-  maintenance_window_time = var.maintenance_window_time
+  aiven_kafka_privatelink_service_name      = local.enable_privatelink ? module.aiven.kafka_privatelink_service_name : ""
+  aiven_pg_privatelink_service_name         = local.enable_privatelink ? module.aiven.pg_privatelink_service_name : ""
+  aiven_valkey_privatelink_service_name     = local.enable_privatelink ? module.aiven.valkey_privatelink_service_name : ""
+  aiven_opensearch_privatelink_service_name = local.enable_privatelink ? module.aiven.opensearch_privatelink_service_name : ""
 }
