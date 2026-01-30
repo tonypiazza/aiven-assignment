@@ -6,6 +6,9 @@ Status command for the clickstream pipeline CLI.
 
 Displays pipeline status and service health in either formatted box output
 or JSON format for programmatic consumption.
+
+Includes light retry logic (3 attempts, ~7 seconds) for network resilience
+when checking service status.
 """
 
 import json as json_module
@@ -14,7 +17,9 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import psycopg2
 import typer
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from clickstream.cli.shared import (
     BOX_WIDTH,
@@ -40,6 +45,12 @@ from clickstream.cli.shared import (
     _section_header_plain,
 )
 from clickstream.utils.config import get_settings
+from clickstream.utils.retry import (
+    RETRY_ATTEMPTS_LIGHT,
+    RETRY_WAIT_MIN,
+    RETRY_WAIT_MAX,
+    log_retry_attempt_light,
+)
 
 
 # ==============================================================================
@@ -206,33 +217,16 @@ def _collect_kafka_data() -> dict[str, Any]:
 
 
 def _collect_kafka_topics_direct(timeout_ms: int = 30000) -> dict[str, Any]:
-    """Collect Kafka topic data via direct connection."""
+    """
+    Collect Kafka topic data via direct connection.
+
+    Uses light retry (3 attempts, ~7 seconds) for connection errors.
+    """
     kafka_status = "unreachable"
     kafka_topics: list[dict[str, Any]] = []
 
     try:
-        from kafka import KafkaAdminClient, KafkaConsumer, TopicPartition
-
-        kafka_config = _get_kafka_config(timeout_ms=timeout_ms)
-
-        admin = KafkaAdminClient(**kafka_config)
-        topic_names = [t for t in admin.list_topics() if not t.startswith("__")]
-        admin.close()
-
-        if topic_names:
-            consumer = KafkaConsumer(**kafka_config)
-            for topic in topic_names:
-                try:
-                    partitions = consumer.partitions_for_topic(topic)
-                    if partitions:
-                        topic_partitions = [TopicPartition(topic, p) for p in partitions]
-                        end_offsets = consumer.end_offsets(topic_partitions)
-                        total_messages = sum(end_offsets.values())
-                        kafka_topics.append({"name": topic, "messages": total_messages})
-                except Exception:
-                    kafka_topics.append({"name": topic, "messages": None})
-            consumer.close()
-
+        kafka_topics = _kafka_connection_with_retry(timeout_ms)
         kafka_status = "connected"
     except Exception:
         pass
@@ -243,6 +237,40 @@ def _collect_kafka_topics_direct(timeout_ms: int = 30000) -> dict[str, Any]:
     }
 
 
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS_LIGHT),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    before_sleep=log_retry_attempt_light,
+    reraise=True,
+)
+def _kafka_connection_with_retry(timeout_ms: int) -> list[dict[str, Any]]:
+    """Make Kafka connection with retry logic."""
+    from kafka import KafkaAdminClient, KafkaConsumer, TopicPartition
+
+    kafka_config = _get_kafka_config(timeout_ms=timeout_ms)
+    kafka_topics: list[dict[str, Any]] = []
+
+    admin = KafkaAdminClient(**kafka_config)
+    topic_names = [t for t in admin.list_topics() if not t.startswith("__")]
+    admin.close()
+
+    if topic_names:
+        consumer = KafkaConsumer(**kafka_config)
+        for topic in topic_names:
+            try:
+                partitions = consumer.partitions_for_topic(topic)
+                if partitions:
+                    topic_partitions = [TopicPartition(topic, p) for p in partitions]
+                    end_offsets = consumer.end_offsets(topic_partitions)
+                    total_messages = sum(end_offsets.values())
+                    kafka_topics.append({"name": topic, "messages": total_messages})
+            except Exception:
+                kafka_topics.append({"name": topic, "messages": None})
+        consumer.close()
+
+    return kafka_topics
+
+
 def _collect_valkey_data() -> dict[str, Any]:
     """Collect Valkey service status data.
 
@@ -250,6 +278,8 @@ def _collect_valkey_data() -> dict[str, Any]:
     1. Try Aiven API first to check if service is running
     2. If running, get session/memory stats via direct connection
     3. If API not configured or fails, fall back to direct connection only
+
+    Uses light retry (3 attempts, ~7 seconds) for connection errors.
     """
     valkey_status = "unreachable"
     valkey_active_sessions = None
@@ -273,16 +303,36 @@ def _collect_valkey_data() -> dict[str, Any]:
     except Exception:
         pass
 
-    # Get detailed stats via direct connection
+    # Get detailed stats via direct connection with retry
     try:
-        from clickstream.utils.session_state import check_valkey_connection, get_valkey_client
+        valkey_active_sessions, valkey_memory = _valkey_connection_with_retry()
+        valkey_status = "connected"
+    except Exception:
+        pass
 
-        if check_valkey_connection():
-            valkey_status = "connected"
-            try:
-                client = get_valkey_client()
-                # Count active sessions using server-side Lua script (single round trip)
-                count_keys_script = """
+    return {
+        "status": valkey_status,
+        "active_sessions": valkey_active_sessions,
+        "memory": valkey_memory,
+    }
+
+
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS_LIGHT),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    before_sleep=log_retry_attempt_light,
+    reraise=True,
+)
+def _valkey_connection_with_retry() -> tuple[int | None, str | None]:
+    """Make Valkey connection with retry logic."""
+    from clickstream.utils.session_state import check_valkey_connection, get_valkey_client
+
+    if not check_valkey_connection():
+        raise ConnectionError("Valkey connection check failed")
+
+    client = get_valkey_client()
+    # Count active sessions using server-side Lua script (single round trip)
+    count_keys_script = """
 local count = 0
 local cursor = "0"
 repeat
@@ -292,22 +342,14 @@ repeat
 until cursor == "0"
 return count
 """
-                valkey_active_sessions = client.eval(count_keys_script, 1, "session:meta:*")
-                info = client.info("memory")
-                valkey_memory = info.get("used_memory_human", None)
-                # Normalize memory format
-                if valkey_memory and valkey_memory[-1] in ("K", "M", "G"):
-                    valkey_memory = valkey_memory[:-1] + " " + valkey_memory[-1] + "B"
-            except Exception:
-                pass
-    except Exception:
-        pass
+    valkey_active_sessions = client.eval(count_keys_script, 1, "session:meta:*")
+    info = client.info("memory")
+    valkey_memory = info.get("used_memory_human", None)
+    # Normalize memory format
+    if valkey_memory and valkey_memory[-1] in ("K", "M", "G"):
+        valkey_memory = valkey_memory[:-1] + " " + valkey_memory[-1] + "B"
 
-    return {
-        "status": valkey_status,
-        "active_sessions": valkey_active_sessions,
-        "memory": valkey_memory,
-    }
+    return valkey_active_sessions, valkey_memory
 
 
 def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
@@ -324,6 +366,8 @@ def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
     - no_database: Server is up but target database doesn't exist
     - no_schema: Database exists but schema not initialized
     - connected: Everything is ready
+
+    Uses light retry (3 attempts, ~7 seconds) for connection errors.
     """
     pg_status = "unreachable"
     pg_events = None
@@ -349,60 +393,9 @@ def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Get detailed stats via direct connection
+    # Get detailed stats via direct connection with retry
     try:
-        import psycopg2
-
-        # Step 1: Check if server is reachable by connecting to 'postgres' database
-        server_conn_string = (
-            f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
-            f"{settings.postgres.host}:{settings.postgres.port}/postgres"
-            f"?sslmode={settings.postgres.sslmode}"
-        )
-        with psycopg2.connect(server_conn_string, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                # Step 2: Check if target database exists
-                cur.execute(
-                    "SELECT 1 FROM pg_database WHERE datname = %s",
-                    (settings.postgres.database,),
-                )
-                if not cur.fetchone():
-                    pg_status = "no_database"
-                    return {
-                        "status": pg_status,
-                        "events": None,
-                        "sessions": None,
-                        "rate": None,
-                    }
-
-        # Step 3: Database exists, connect to it and check schema
-        with psycopg2.connect(settings.postgres.connection_string, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                schema_name = settings.postgres.schema_name
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = %s 
-                        AND table_name = 'events'
-                    )
-                    """,
-                    (schema_name,),
-                )
-                result = cur.fetchone()
-                schema_exists = result[0] if result else False
-
-                if schema_exists:
-                    cur.execute(f"SELECT COUNT(*) FROM {schema_name}.events")
-                    result = cur.fetchone()
-                    pg_events = result[0] if result else 0
-
-                    cur.execute(f"SELECT COUNT(*) FROM {schema_name}.sessions")
-                    result = cur.fetchone()
-                    pg_sessions = result[0] if result else 0
-                    pg_status = "connected"
-                else:
-                    pg_status = "no_schema"
+        pg_status, pg_events, pg_sessions = _postgresql_connection_with_retry(settings)
     except Exception:
         pass
 
@@ -424,6 +417,63 @@ def _collect_postgresql_data(settings: Any, num_running: int) -> dict[str, Any]:
         "sessions": pg_sessions,
         "rate": pg_rate,
     }
+
+
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS_LIGHT),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    retry=retry_if_exception_type((psycopg2.OperationalError, psycopg2.InterfaceError)),
+    before_sleep=log_retry_attempt_light,
+    reraise=True,
+)
+def _postgresql_connection_with_retry(settings: Any) -> tuple[str, int | None, int | None]:
+    """Make PostgreSQL connection with retry logic."""
+    # Step 1: Check if server is reachable by connecting to default database
+    # Aiven PostgreSQL uses 'defaultdb', local PostgreSQL uses 'postgres'
+    default_db = "defaultdb" if settings.aiven.is_configured else "postgres"
+    server_conn_string = (
+        f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
+        f"{settings.postgres.host}:{settings.postgres.port}/{default_db}"
+        f"?sslmode={settings.postgres.sslmode}"
+    )
+    with psycopg2.connect(server_conn_string, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            # Step 2: Check if target database exists
+            cur.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s",
+                (settings.postgres.database,),
+            )
+            if not cur.fetchone():
+                return "no_database", None, None
+
+    # Step 3: Database exists, connect to it and check schema
+    with psycopg2.connect(settings.postgres.connection_string, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            schema_name = settings.postgres.schema_name
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = %s 
+                    AND table_name = 'events'
+                )
+                """,
+                (schema_name,),
+            )
+            result = cur.fetchone()
+            schema_exists = result[0] if result else False
+
+            if schema_exists:
+                cur.execute(f"SELECT COUNT(*) FROM {schema_name}.events")
+                result = cur.fetchone()
+                pg_events = result[0] if result else 0
+
+                cur.execute(f"SELECT COUNT(*) FROM {schema_name}.sessions")
+                result = cur.fetchone()
+                pg_sessions = result[0] if result else 0
+                return "connected", pg_events, pg_sessions
+            else:
+                return "no_schema", None, None
 
 
 def _collect_opensearch_data(settings: Any, os_consumer_running: bool) -> dict[str, Any]:

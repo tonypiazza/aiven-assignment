@@ -42,16 +42,23 @@ def build_kafka_config(
     settings: "KafkaSettings",
     include_serializers: bool = False,
     request_timeout_ms: int | None = None,
+    include_retry_config: bool = True,
+    include_producer_retries: bool = False,
 ) -> dict:
     """
     Build Kafka client configuration from settings.
 
     Supports PLAINTEXT (local) and SSL (Aiven mTLS) security protocols.
+    Includes retry and reconnection parameters for network resilience.
 
     Args:
         settings: KafkaSettings instance
         include_serializers: If True, add JSON serializers (for producer)
         request_timeout_ms: Optional request timeout in milliseconds
+        include_retry_config: If True, add connection retry/reconnect parameters (default: True)
+        include_producer_retries: If True, add producer-specific retry settings (default: False)
+            Note: 'retries' and 'retry_backoff_ms' are only valid for KafkaProducer,
+            not for KafkaConsumer or KafkaAdminClient.
 
     Returns:
         Dict with Kafka client configuration
@@ -61,8 +68,32 @@ def build_kafka_config(
         "security_protocol": settings.security_protocol,
     }
 
-    if request_timeout_ms is not None:
+    # Add connection retry/reconnect configuration for network resilience
+    # These parameters are valid for all Kafka clients (producer, consumer, admin)
+    if include_retry_config:
+        config.update(
+            {
+                # Connection retry settings (applies to all clients)
+                "reconnect_backoff_ms": 1000,
+                "reconnect_backoff_max_ms": 32000,
+                # Request timeout
+                "request_timeout_ms": request_timeout_ms or 30000,
+                # Keep connections alive longer to avoid unnecessary reconnects
+                "connections_max_idle_ms": 540000,  # 9 minutes
+            }
+        )
+    elif request_timeout_ms is not None:
         config["request_timeout_ms"] = request_timeout_ms
+
+    # Add producer-specific retry settings
+    # Note: These are ONLY valid for KafkaProducer, not Consumer or AdminClient
+    if include_producer_retries:
+        config.update(
+            {
+                "retries": 10,
+                "retry_backoff_ms": 1000,
+            }
+        )
 
     # Add SSL config if using SSL protocol
     if settings.security_protocol == "SSL":

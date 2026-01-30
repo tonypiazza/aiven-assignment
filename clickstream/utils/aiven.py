@@ -8,14 +8,23 @@ This module provides functions to check Aiven service status via the REST API,
 which is significantly faster than making direct connections (especially for
 Kafka with mTLS authentication).
 
+Includes light retry logic (3 attempts, ~7 seconds) for network resilience.
+
 API Documentation: https://api.aiven.io/doc/
 """
 
 from typing import Any, Optional
 
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from clickstream.utils.config import get_settings
+from clickstream.utils.retry import (
+    RETRY_ATTEMPTS_LIGHT,
+    RETRY_WAIT_MIN,
+    RETRY_WAIT_MAX,
+    log_retry_attempt_light,
+)
 
 AIVEN_API_BASE = "https://api.aiven.io/v1"
 DEFAULT_TIMEOUT = 10  # seconds
@@ -26,11 +35,71 @@ DEFAULT_TIMEOUT = 10  # seconds
 # ==============================================================================
 
 
+def _make_service_request(
+    service_name: str, settings: Any, timeout: int
+) -> Optional[dict[str, Any]]:
+    """
+    Make a request to the Aiven API for service status.
+
+    This is a helper function that handles the actual HTTP request,
+    allowing for retry logic to be applied.
+
+    Args:
+        service_name: Name of the Aiven service
+        settings: Settings object with Aiven configuration
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary with service status information, or None if request fails.
+
+    Raises:
+        requests.exceptions.ConnectionError: On connection errors (retryable)
+        requests.exceptions.Timeout: On timeout (retryable)
+    """
+    url = f"{AIVEN_API_BASE}/project/{settings.aiven.project_name}/service/{service_name}"
+    headers = {"Authorization": f"Bearer {settings.aiven.api_token}"}
+
+    response = requests.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    service = data.get("service", {})
+
+    return {
+        "state": service.get("state"),
+        "plan": service.get("plan"),
+        "node_states": service.get("node_states", []),
+        "service_uri": service.get("service_uri"),
+        "service_type": service.get("service_type"),
+    }
+
+
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS_LIGHT),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    retry=retry_if_exception_type(
+        (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+    ),
+    before_sleep=log_retry_attempt_light,
+    reraise=True,
+)
+def _make_service_request_with_retry(
+    service_name: str, settings: Any, timeout: int
+) -> Optional[dict[str, Any]]:
+    """
+    Make a request to the Aiven API with retry logic.
+
+    Retries on connection errors and timeouts (3 attempts, ~7 seconds).
+    """
+    return _make_service_request(service_name, settings, timeout)
+
+
 def get_service_status(
     service_name: str, timeout: int = DEFAULT_TIMEOUT
 ) -> Optional[dict[str, Any]]:
     """
     Get service status from Aiven API.
+
+    Uses light retry logic (3 attempts, ~7 seconds) for connection errors.
 
     Args:
         service_name: Name of the Aiven service
@@ -49,22 +118,8 @@ def get_service_status(
     if not settings.aiven.is_configured:
         return None
 
-    url = f"{AIVEN_API_BASE}/project/{settings.aiven.project_name}/service/{service_name}"
-    headers = {"Authorization": f"Bearer {settings.aiven.api_token}"}
-
     try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        service = data.get("service", {})
-
-        return {
-            "state": service.get("state"),
-            "plan": service.get("plan"),
-            "node_states": service.get("node_states", []),
-            "service_uri": service.get("service_uri"),
-            "service_type": service.get("service_type"),
-        }
+        return _make_service_request_with_retry(service_name, settings, timeout)
     except requests.exceptions.Timeout:
         return None
     except requests.exceptions.RequestException:

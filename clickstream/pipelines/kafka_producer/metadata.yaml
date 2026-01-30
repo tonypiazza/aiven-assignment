@@ -53,4 +53,5 @@ spark_config: {}
 tags: []
 type: python
 uuid: kafka_producer
+variables_dir: /Users/tonypiazza/.mage_data/clickstream
 widgets: []

@@ -5,6 +5,7 @@
 Database utility functions for the clickstream pipeline.
 
 Provides schema initialization and other database helpers.
+Includes retry logic with exponential backoff for network resilience.
 """
 
 import logging
@@ -12,8 +13,15 @@ from pathlib import Path
 
 import psycopg2
 from jinja2 import Template
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from clickstream.utils.config import get_settings
+from clickstream.utils.retry import (
+    RETRY_ATTEMPTS,
+    RETRY_WAIT_MIN,
+    RETRY_WAIT_MAX,
+    log_retry_attempt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +52,22 @@ def render_schema_sql(schema_name: str) -> str:
     return template.render(schema_name=schema_name)
 
 
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    retry=retry_if_exception_type((psycopg2.OperationalError, psycopg2.InterfaceError)),
+    before_sleep=log_retry_attempt,
+    reraise=True,
+)
 def ensure_database_exists() -> None:
     """
     Ensure the target database exists, creating it if needed.
 
-    Connects to the 'postgres' database (which always exists) to check
-    and create the target database.
+    Connects to the default database to check and create the target database.
+    - Aiven PostgreSQL uses 'defaultdb'
+    - Local PostgreSQL uses 'postgres'
+
+    Retries on connection errors with exponential backoff (10 attempts, ~60 seconds).
 
     Raises:
         RuntimeError: If database creation fails
@@ -57,17 +75,18 @@ def ensure_database_exists() -> None:
     settings = get_settings()
     target_db = settings.postgres.database
 
-    # Build connection string to 'postgres' database instead of target
-    postgres_conn_string = (
+    # Aiven PostgreSQL uses 'defaultdb', local PostgreSQL uses 'postgres'
+    default_db = "defaultdb" if settings.aiven.is_configured else "postgres"
+    admin_conn_string = (
         f"postgresql://{settings.postgres.user}:{settings.postgres.password}@"
-        f"{settings.postgres.host}:{settings.postgres.port}/postgres"
+        f"{settings.postgres.host}:{settings.postgres.port}/{default_db}"
         f"?sslmode={settings.postgres.sslmode}"
     )
 
     try:
-        # Connect to postgres database to check/create target database
+        # Connect to admin database to check/create target database
         # Use autocommit because CREATE DATABASE cannot run inside a transaction
-        conn = psycopg2.connect(postgres_conn_string, connect_timeout=5)
+        conn = psycopg2.connect(admin_conn_string, connect_timeout=5)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
@@ -88,8 +107,19 @@ def ensure_database_exists() -> None:
         raise RuntimeError(f"Failed to ensure database exists: {e}") from e
 
 
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    retry=retry_if_exception_type((psycopg2.OperationalError, psycopg2.InterfaceError)),
+    before_sleep=log_retry_attempt,
+    reraise=True,
+)
 def check_schema_exists() -> bool:
-    """Check if the database schema (events table) exists."""
+    """
+    Check if the database schema (events table) exists.
+
+    Retries on connection errors with exponential backoff (10 attempts, ~60 seconds).
+    """
     try:
         settings = get_settings()
         schema_name = settings.postgres.schema_name
@@ -111,12 +141,21 @@ def check_schema_exists() -> bool:
         return False
 
 
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    retry=retry_if_exception_type((psycopg2.OperationalError, psycopg2.InterfaceError)),
+    before_sleep=log_retry_attempt,
+    reraise=True,
+)
 def ensure_schema() -> None:
     """
     Ensure database schema exists, initializing if needed.
 
     This function is idempotent and safe to call multiple times.
     It will create the database if it doesn't exist.
+
+    Retries on connection errors with exponential backoff (10 attempts, ~60 seconds).
 
     Raises:
         RuntimeError: If schema file not found or initialization fails

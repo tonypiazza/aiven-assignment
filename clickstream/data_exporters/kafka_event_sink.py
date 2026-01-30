@@ -52,8 +52,12 @@ def export_events_to_kafka(df: pl.DataFrame, *args, **kwargs) -> dict:
     realtime_mode = kwargs.get("realtime_mode", False)
     topic = settings.kafka.events_topic
 
-    # Build Kafka config with SSL support
-    producer_config = build_kafka_config(settings.kafka, include_serializers=True)
+    # Build Kafka config with SSL support and producer-specific retry settings
+    producer_config = build_kafka_config(
+        settings.kafka,
+        include_serializers=True,
+        include_producer_retries=True,
+    )
 
     # Create producer
     producer = KafkaProducer(**producer_config)

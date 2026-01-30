@@ -7,6 +7,7 @@ Valkey/Redis utilities for managing session state in streaming pipelines.
 This module provides:
 - Session state storage with automatic TTL
 - Atomic session updates using Redis transactions
+- Retry logic with exponential backoff for network resilience
 
 Note: Event deduplication is handled by PostgreSQL via a unique index
 on (visitor_id, event_time, event, item_id) with ON CONFLICT DO NOTHING.
@@ -16,6 +17,7 @@ Session State Schema (per visitor):
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -26,6 +28,9 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from redis.retry import Retry
 
 from clickstream.utils.config import get_settings
+from clickstream.utils.retry import VALKEY_RETRIES
+
+logger = logging.getLogger(__name__)
 
 
 def get_valkey_client() -> redis.Redis:
@@ -34,7 +39,7 @@ def get_valkey_client() -> redis.Redis:
 
     Configured with:
     - 10 second socket timeouts for fast failure detection
-    - 3 automatic retries with exponential backoff for transient failures
+    - 10 automatic retries with exponential backoff for transient failures
     - Health check interval to keep connections alive
 
     Returns:
@@ -43,7 +48,8 @@ def get_valkey_client() -> redis.Redis:
     settings = get_settings()
 
     # Configure retry with exponential backoff for transient failures
-    retry = Retry(ExponentialBackoff(), retries=3)
+    # 10 retries over ~60 seconds for network resilience
+    retry = Retry(ExponentialBackoff(cap=32, base=1), retries=VALKEY_RETRIES)
 
     return redis.from_url(
         settings.valkey.url,
@@ -109,6 +115,32 @@ class SessionState:
 
     def _meta_key(self, visitor_id: int) -> str:
         return f"{self.META_PREFIX}{visitor_id}"
+
+    def _execute_pipeline_with_retry(self, pipeline_builder) -> List:
+        """
+        Execute a Redis pipeline with retry logic for network resilience.
+
+        Args:
+            pipeline_builder: Callable that takes a pipeline and adds commands to it
+
+        Returns:
+            List of results from pipeline execution
+        """
+        from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+        from clickstream.utils.retry import RETRY_ATTEMPTS, RETRY_WAIT_MIN, RETRY_WAIT_MAX
+
+        @retry(
+            stop=stop_after_attempt(RETRY_ATTEMPTS),
+            wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+            retry=retry_if_exception_type((RedisConnectionError, RedisTimeoutError)),
+            reraise=True,
+        )
+        def _execute():
+            pipe = self.client.pipeline()
+            pipeline_builder(pipe)
+            return pipe.execute()
+
+        return _execute()
 
     def get_session(self, visitor_id: int) -> Optional[dict]:
         """
@@ -241,6 +273,8 @@ class SessionState:
 
         Performance: 2 Valkey round-trips instead of ~3500 for 1000 events.
 
+        Includes retry logic with exponential backoff for network resilience.
+
         Args:
             events: List of event dicts with timestamp, visitor_id, event, item_id, transaction_id
 
@@ -254,10 +288,10 @@ class SessionState:
         visitor_ids = list(set(e["visitor_id"] for e in events))
 
         # 2. Batch fetch all existing sessions (one pipeline call)
-        pipe = self.client.pipeline()
-        for vid in visitor_ids:
-            pipe.hgetall(self._meta_key(vid))
-        results = pipe.execute()
+        # Wrap in retry logic for network resilience
+        results = self._execute_pipeline_with_retry(
+            lambda pipe: [pipe.hgetall(self._meta_key(vid)) for vid in visitor_ids]
+        )
 
         # 3. Parse fetched sessions into a local dict
         sessions: Dict[int, Dict] = {}
@@ -334,30 +368,32 @@ class SessionState:
             updated_visitor_ids.add(visitor_id)
 
         # 6. Batch write all updated sessions back to Valkey (one pipeline call)
-        pipe = self.client.pipeline()
-        for vid in updated_visitor_ids:
-            session = sessions[vid]
-            meta_key = self._meta_key(vid)
-            pipe.hset(
-                meta_key,
-                mapping={
-                    "session_id": session["session_id"],
-                    "visitor_id": str(session["visitor_id"]),
-                    "session_num": str(session["session_num"]),
-                    "session_start": str(session["session_start"]),
-                    "session_end": str(session["session_end"]),
-                    "event_count": str(session["event_count"]),
-                    "view_count": str(session["view_count"]),
-                    "cart_count": str(session["cart_count"]),
-                    "transaction_count": str(session["transaction_count"]),
-                    "items_viewed": json.dumps(session["items_viewed"]),
-                    "items_carted": json.dumps(session["items_carted"]),
-                    "items_purchased": json.dumps(session["items_purchased"]),
-                    "last_activity": str(session["last_activity"]),
-                },
-            )
-            pipe.expire(meta_key, self.ttl_seconds)
-        pipe.execute()
+        # Wrap in retry logic for network resilience
+        def build_write_pipeline(pipe):
+            for vid in updated_visitor_ids:
+                session = sessions[vid]
+                meta_key = self._meta_key(vid)
+                pipe.hset(
+                    meta_key,
+                    mapping={
+                        "session_id": session["session_id"],
+                        "visitor_id": str(session["visitor_id"]),
+                        "session_num": str(session["session_num"]),
+                        "session_start": str(session["session_start"]),
+                        "session_end": str(session["session_end"]),
+                        "event_count": str(session["event_count"]),
+                        "view_count": str(session["view_count"]),
+                        "cart_count": str(session["cart_count"]),
+                        "transaction_count": str(session["transaction_count"]),
+                        "items_viewed": json.dumps(session["items_viewed"]),
+                        "items_carted": json.dumps(session["items_carted"]),
+                        "items_purchased": json.dumps(session["items_purchased"]),
+                        "last_activity": str(session["last_activity"]),
+                    },
+                )
+                pipe.expire(meta_key, self.ttl_seconds)
+
+        self._execute_pipeline_with_retry(build_write_pipeline)
 
         # 7. Return updated sessions (already in memory, no fetch needed)
         return [sessions[vid] for vid in updated_visitor_ids]

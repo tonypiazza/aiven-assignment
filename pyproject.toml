@@ -27,6 +27,8 @@ dependencies = [
     "sshtunnel>=0.4.0",
     # Process utilities
     "psutil>=5.9",
+    # Retry logic
+    "tenacity>=8.0",
 ]
 
 [project.scripts]
